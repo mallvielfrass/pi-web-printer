@@ -1,0 +1,8 @@
+# Python 3.11+ (на Raspberry Pi — 3.13).
+# Модуль cups ставится пакетом apt python3-cups, не из этого файла.
+# Виртуальное окружение нужно создавать с --system-site-packages.
+# Пакет pycups с pip — тот же модуль, если ставите без apt.
+
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+python-multipart>=0.0.18

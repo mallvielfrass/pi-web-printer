@@ -1,0 +1,23 @@
+[Unit]
+Description=Веб-станция печати и сканирования
+After=network-online.target cups.service ipp-usb.service
+Wants=network-online.target cups.service ipp-usb.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+SupplementaryGroups=lp scanner
+UMask=0077
+WorkingDirectory=/opt/pi-web-printer
+Environment=DATA_DIR=/var/lib/pi-web-printer
+# Имя очереди из `lpstat -p`. Без этой строки берётся первый принтер.
+# Environment=PRINTER_NAME=Pantum-M6507
+# Строка из `scanimage -L`, в кавычках. Без неё scanimage сам выбирает устройство.
+# Environment=SCANNER_DEVICE=escl:http://127.0.0.1:60000
+ExecStart=/opt/pi-web-printer/.venv/bin/uvicorn server.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
