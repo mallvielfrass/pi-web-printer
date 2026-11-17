@@ -27,25 +27,33 @@ log = logging.getLogger(__name__)
 # Предел не даёт забить карту памяти пачкой загрузок.
 MAX_FILES_PER_USER = 100
 
-# Прямо в CUPS, без LibreOffice. TIFF в браузере телефона часто не рисуется,
-# поэтому для предпросмотра он всё равно идёт через конвертацию в PDF.
+# Прямо в CUPS, без LibreOffice. Картинки для экрана уменьшаются отдельно:
+# скан A4 целиком по Wi-Fi телефон открывает очень долго.
 DIRECT_PRINT = {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".txt"}
+_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 _PREVIEW_AS_IS = {
     ".pdf": "application/pdf",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
     ".txt": "text/plain; charset=utf-8",
 }
+
+# Длинная сторона около 1600 px: на телефоне текст ещё читается, файл уже не мегабайты.
+PREVIEW_LONG_SIDE = 1600
+PREVIEW_JPEG_QUALITY = 80
 
 router = APIRouter(prefix="/api/files")
 
 # soffice держит профиль и плохо переносит два одновременных запуска.
 # На плате с 1 ГБ второй процесс ещё и некуда класть.
 _convert_lock = threading.Lock()
+# Два больших скана сразу декодировать некуда: на 1 ГБ это легко съедает память.
+_preview_lock = threading.Lock()
 
 
 class ConversionError(Exception):
+    pass
+
+
+class PreviewError(Exception):
     pass
 
 
@@ -185,6 +193,83 @@ def pdf_for_preview(source: Path, dest: Path) -> Path:
         return dest
 
 
+def remove_previews(preview_dir: Path, file_id: int) -> None:
+    """PDF от LibreOffice и JPEG картинки лежат рядом и удаляются вместе с файлом."""
+    for suffix in (".pdf", ".jpg"):
+        (preview_dir / f"{file_id}{suffix}").unlink(missing_ok=True)
+
+
+def jpeg_for_preview(source: Path, dest: Path) -> Path:
+    """Уменьшенный JPEG в каталоге превью. Повторный запрос берёт уже готовый файл."""
+    with _preview_lock:
+        if dest.is_file() and dest.stat().st_size > 0:
+            return dest
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Рядом с итогом, чтобы replace не переходил на другой диск.
+        tmp = dest.with_name(dest.name + ".part")
+        try:
+            _write_jpeg_preview(source, tmp)
+            tmp.chmod(0o600)
+            tmp.replace(dest)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        return dest
+
+
+def _write_jpeg_preview(source: Path, dest: Path) -> None:
+    try:
+        from PIL import Image, ImageOps
+        from PIL.ExifTags import Base
+    except ImportError as exc:
+        raise PreviewError("Не установлен Pillow") from exc
+    image = None
+    try:
+        image = Image.open(source)
+        # draft просит JPEG и часть TIFF отдать уже уменьшенную копию,
+        # до полной распаковки. У PNG такого режима нет.
+        side = (PREVIEW_LONG_SIDE, PREVIEW_LONG_SIDE)
+        if image.mode in ("L", "1"):
+            image.draft("L", side)
+        else:
+            image.draft("RGB", side)
+        # thumbnail уменьшает на месте, вторую полноразмерную копию не делаем.
+        image.thumbnail(side, Image.Resampling.BICUBIC)
+        orientation = image.getexif().get(Base.Orientation)
+        if orientation not in (None, 1):
+            turned = ImageOps.exif_transpose(image)
+            image.close()
+            image = turned
+        ready = _for_jpeg(image)
+        if ready is not image:
+            image.close()
+            image = ready
+        image.save(dest, "JPEG", quality=PREVIEW_JPEG_QUALITY)
+    except PreviewError:
+        raise
+    except Exception as exc:
+        log.warning("предпросмотр %s: %s", source.name, exc)
+        raise PreviewError("Не удалось подготовить предпросмотр") from exc
+    finally:
+        if image is not None:
+            image.close()
+
+
+def _for_jpeg(image):
+    """JPEG не хранит палитру и прозрачность. Уже RGB или серый возвращаем как есть."""
+    from PIL import Image
+
+    if image.mode in ("RGB", "L"):
+        return image
+    if image.mode in ("RGBA", "LA"):
+        flat = Image.new("RGB", image.size, (255, 255, 255))
+        flat.paste(image, mask=image.getchannel("A"))
+        return flat
+    if image.mode == "1":
+        return image.convert("L")
+    return image.convert("RGB")
+
+
 def convert_to_pdf(source: Path, dest: Path) -> None:
     binary = shutil.which("libreoffice") or shutil.which("soffice")
     if binary is None:
@@ -319,6 +404,19 @@ def download(file_id: int, request: Request, conn: Db) -> FileResponse:
 def preview(file_id: int, request: Request, conn: Db) -> FileResponse:
     row, path = _owned(conn, request, file_id)
     ext = path.suffix.lower()
+    if ext in _IMAGE_EXT:
+        dest = request.app.state.preview_dir / f"{row['id']}.jpg"
+        try:
+            jpeg = jpeg_for_preview(path, dest)
+        except PreviewError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        preview_name = f"{Path(row['name']).stem}.jpg"
+        return FileResponse(
+            jpeg,
+            media_type="image/jpeg",
+            filename=preview_name,
+            content_disposition_type="inline",
+        )
     media = _PREVIEW_AS_IS.get(ext)
     if media is not None:
         return FileResponse(path, media_type=media, filename=row["name"], content_disposition_type="inline")
@@ -342,5 +440,5 @@ def remove(file_id: int, request: Request, conn: Db) -> dict:
     path = absolute_path(request.app.state.storage_dir, row["path"])
     if path is not None:
         path.unlink(missing_ok=True)
-    (request.app.state.preview_dir / f"{file_id}.pdf").unlink(missing_ok=True)
+    remove_previews(request.app.state.preview_dir, file_id)
     return {"ok": True}

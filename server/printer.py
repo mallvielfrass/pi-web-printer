@@ -5,6 +5,13 @@
 printer-state-reasons. Если драйвер эти поля не прислал, в ответе
 «неизвестно».
 
+Список бумаги — media-supported очереди. Размер по умолчанию —
+media-default: у PPD это опция PageSize. В задание уходит исходное
+имя CUPS в опции media, даже если на экране оно короче.
+
+Стадия задания читается из job-state одним запросом getJobAttributes.
+Долю страниц драйвер не присылает, поэтому шкала на сайте — по стадиям.
+
 app.state.printer_factory возвращает соединение. В тестах туда
 кладётся подмена, pycups и cupsd не нужны.
 """
@@ -61,24 +68,30 @@ def open_cups():
 
 
 def describe(attrs: dict, name: str) -> dict:
+    media = media_list(attrs)
     return {
         "name": name,
         "toner": toner_text(attrs),
         "paper": paper_text(attrs),
         "duplex": duplex_supported(attrs),
-        "media": media_list(attrs),
+        "media": media,
+        "media_default": media_default_name(attrs, media),
+        "media_labels": {item: media_label(item) for item in media},
         "state": state_text(attrs),
         "message": None,
     }
 
 
 def unknown_status(name: str, message: str) -> dict:
+    media = list(DEFAULT_MEDIA)
     return {
         "name": name,
         "toner": "неизвестно",
         "paper": "неизвестно",
         "duplex": False,
-        "media": list(DEFAULT_MEDIA),
+        "media": media,
+        "media_default": None,
+        "media_labels": {item: media_label(item) for item in media},
         "state": "неизвестно",
         "message": message,
     }
@@ -118,6 +131,31 @@ def duplex_supported(attrs: dict) -> bool:
     return any(item.startswith("two-sided") for item in _strings(attrs.get("sides-supported")))
 
 
+# Куски имён PWG/PPD вроде iso_a4_210x297mm и na_letter_8.5x11in.
+_MEDIA_LABELS = {
+    "a3": "A3",
+    "a4": "A4",
+    "a5": "A5",
+    "a6": "A6",
+    "b4": "B4",
+    "b5": "B5",
+    "letter": "Letter",
+    "legal": "Legal",
+    "tabloid": "Tabloid",
+    "ledger": "Ledger",
+    "executive": "Executive",
+    "folio": "Folio",
+}
+
+
+def media_label(name: str) -> str:
+    """Короткое имя для списка. В печать уходит исходная строка."""
+    for part in name.replace("-", "_").lower().split("_"):
+        if part in _MEDIA_LABELS:
+            return _MEDIA_LABELS[part]
+    return name
+
+
 def media_list(attrs: dict) -> list[str]:
     found: list[str] = []
     for item in _strings(attrs.get("media-supported")):
@@ -125,7 +163,28 @@ def media_list(attrs: dict) -> list[str]:
             found.append(item)
         if len(found) == 30:
             break
-    return found or list(DEFAULT_MEDIA)
+    if not found:
+        return list(DEFAULT_MEDIA)
+    # A4 первым: его печатают чаще всего. Остальной порядок CUPS не трогаем.
+    return sorted(found, key=_media_rank)
+
+
+def media_default_name(attrs: dict, choices: list[str]) -> str | None:
+    """media-default, если такое имя реально есть в списке."""
+    names = _strings(attrs.get("media-default"))
+    if not names:
+        return None
+    if names[0] in choices:
+        return names[0]
+    return None
+
+
+def _media_rank(name: str) -> int:
+    if name == "A4":
+        return 0
+    if media_label(name) == "A4":
+        return 1
+    return 2
 
 
 def state_text(attrs: dict) -> str:
@@ -184,6 +243,36 @@ def cups_options(copies: int, pages: str, sides: str, media: str, fit: bool) -> 
     if fit:
         options["fit-to-page"] = "true"
     return options
+
+
+# Числа job-state из IPP. Слово stage на странице переводится в подпись.
+_JOB_STAGES = {
+    3: "queued",
+    4: "queued",
+    5: "printing",
+    6: "stopped",
+    7: "canceled",
+    8: "aborted",
+    9: "done",
+}
+
+
+def job_view(attrs: dict, job_id: int) -> dict:
+    try:
+        state = int(attrs.get("job-state"))
+    except (TypeError, ValueError):
+        state = 0
+    return {"id": job_id, "stage": _JOB_STAGES.get(state, "unknown")}
+
+
+def read_job(connection, job_id: int) -> dict:
+    try:
+        attrs = connection.getJobAttributes(job_id)
+    except Exception as exc:
+        raise PrinterError("Задание не найдено") from exc
+    if not isinstance(attrs, dict):
+        raise PrinterError("CUPS вернул неожиданный ответ")
+    return job_view(attrs, job_id)
 
 
 def _job_title(name: str) -> str:
@@ -291,3 +380,16 @@ def print_document(body: PrintIn, request: Request, conn: Db) -> dict:
         log.exception("печать не принята, file_id=%s", row["id"])
         raise HTTPException(503, "CUPS не принял задание") from None
     return {"job_id": job_id}
+
+
+@router.get("/jobs/{job_id}")
+def job_status(job_id: int, request: Request, conn: Db) -> dict:
+    # Без сессии не говорим, есть ли такое задание. Саму очередь CUPS не прячем глубже:
+    # номер задания и так виден в lpstat на плате.
+    if user_from_cookie(conn, request) is None or job_id < 1:
+        raise HTTPException(404, "Задание не найдено")
+    try:
+        connection = request.app.state.printer_factory()
+        return read_job(connection, job_id)
+    except PrinterError as exc:
+        raise HTTPException(404, str(exc)) from exc

@@ -24,10 +24,13 @@ def create_app(
     max_upload_bytes: int = 50 * 1024 * 1024,
     printer_name: str | None = None,
     scanner_device: str | None = None,
+    scan_rotate: int = 0,
     cookie_secure: bool = False,
     dist_dir: Path | None = None,
 ) -> FastAPI:
     # Документы и база не должны читаться другими локальными пользователями.
+    if scan_rotate not in scanner.SCAN_ROTATIONS:
+        raise ValueError("SCAN_ROTATE должен быть 0, 90, 180 или 270")
     os.umask(0o077)
     data_dir = data_dir.resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -61,6 +64,7 @@ def create_app(
     app.state.max_upload_bytes = max_upload_bytes
     app.state.printer_name = printer_name
     app.state.scanner_device = scanner_device
+    app.state.scan_rotate = scan_rotate
     app.state.cookie_secure = cookie_secure
     app.state.printer_factory = printer.open_cups
     app.state.scan_to_file = scanner.scan_to_file
@@ -125,11 +129,16 @@ def app_from_env() -> FastAPI:
         raise SystemExit("MAX_UPLOAD_MB должен быть целым числом") from None
     if not 1 <= megabytes <= 200:
         raise SystemExit("MAX_UPLOAD_MB должен быть от 1 до 200")
+    try:
+        scan_rotate = scanner.parse_scan_rotate(os.environ.get("SCAN_ROTATE"))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     return create_app(
         Path(os.environ.get("DATA_DIR", str(ROOT / "data"))),
         max_upload_bytes=megabytes * 1024 * 1024,
         printer_name=os.environ.get("PRINTER_NAME") or None,
         scanner_device=os.environ.get("SCANNER_DEVICE") or None,
+        scan_rotate=scan_rotate,
         cookie_secure=os.environ.get("COOKIE_SECURE") == "1",
     )
 

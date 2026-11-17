@@ -14,9 +14,9 @@ const loading = ref(false)
 
 function kindOf(name) {
   const ext = String(name).split('.').pop().toLowerCase()
-  if (ext === 'png' || ext === 'jpg' || ext === 'jpeg') return 'image'
+  // png, jpeg и tiff сервер отдаёт уже уменьшенным JPEG.
+  if (ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'tif' || ext === 'tiff') return 'image'
   if (ext === 'txt') return 'text'
-  // TIFF и офисные файлы сервер отдаёт уже как PDF: телефон их так и покажет.
   return 'pdf'
 }
 

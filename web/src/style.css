@@ -78,6 +78,16 @@ button:disabled { opacity: 0.6; }
   font-size: 1.15rem;
 }
 
+.back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 0 0.15rem;
+  color: inherit;
+  font-weight: 700;
+  text-decoration: none;
+}
+
 nav {
   display: flex;
   gap: 0.85rem;
@@ -170,6 +180,45 @@ h2 { font-size: 1.1rem; margin: 1.25rem 0 0.5rem; }
   height: 100%;
   background: var(--ink);
 }
+
+.bar.bad span { background: var(--danger); }
+
+.job { margin-top: 0.75rem; }
+.job-title { margin: 0; font-weight: 700; }
+
+.stages {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.25rem;
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.stages .on { color: var(--ink); font-weight: 700; }
+
+.modal-back {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(29, 26, 22, 0.45);
+}
+
+.modal {
+  width: min(22rem, 100%);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  padding: 1rem;
+}
+
+.modal h2 { margin: 0 0 0.75rem; }
 
 /* Две карточки остаются в ряд и на узком экране. */
 .home-actions {

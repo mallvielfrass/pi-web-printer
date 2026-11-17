@@ -1,6 +1,9 @@
 <script setup>
 import { onMounted, provide, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { api } from './api'
+
+const route = useRoute()
 
 const user = ref(null)
 const ready = ref(false)
@@ -26,7 +29,8 @@ onMounted(async () => {
 <template>
   <div class="wrap">
     <header class="top">
-      <router-link class="brand" to="/">Принтер</router-link>
+      <router-link v-if="route.path !== '/'" class="back" to="/">← Назад</router-link>
+      <router-link v-else class="brand" to="/">Принтер</router-link>
       <nav>
         <router-link v-if="user && !user.temporary" to="/files">Файлы</router-link>
         <router-link to="/login">

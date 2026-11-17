@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
 import FileList from '../components/FileList.vue'
@@ -10,8 +10,28 @@ const files = ref([])
 const selected = ref(null)
 const printer = ref(null)
 const error = ref('')
-const ok = ref('')
 const busy = ref(false)
+const started = ref(false)
+const job = ref(null)
+let jobTimer = 0
+
+// Полоска отмечает стадию, не процент страниц: CUPS его не присылает.
+const jobStages = [
+  { id: 'sent', label: 'Отправлено' },
+  { id: 'queued', label: 'В очереди' },
+  { id: 'printing', label: 'Печатает' },
+  { id: 'done', label: 'Готово' },
+]
+const jobLabels = {
+  sent: 'Отправлено',
+  queued: 'В очереди',
+  printing: 'Печатает',
+  stopped: 'Остановлено',
+  done: 'Готово',
+  canceled: 'Отменено',
+  aborted: 'Сбой печати',
+  unknown: 'Нет данных о задании',
+}
 const input = ref(null)
 const picked = ref('')
 const copies = ref(1)
@@ -28,10 +48,19 @@ async function reload() {
   files.value = data.files
 }
 
+function pickMedia(status) {
+  const sizes = status?.media || []
+  const labels = status?.media_labels || {}
+  const preferred = status?.media_default
+  if (preferred && sizes.includes(preferred)) return preferred
+  const a4 = sizes.find((size) => size === 'A4' || labels[size] === 'A4')
+  if (a4) return a4
+  return sizes[0] || 'A4'
+}
+
 async function loadPrinter() {
   printer.value = await api.printer()
-  const sizes = printer.value.media || []
-  if (sizes.length && !sizes.includes(media.value)) media.value = sizes[0]
+  media.value = pickMedia(printer.value)
   if (!printer.value.duplex) sides.value = 'none'
 }
 
@@ -46,12 +75,57 @@ async function selectById(id) {
   selected.value = data.file
 }
 
-async function select(file) {
-  selected.value = file
-  ok.value = ''
-  error.value = ''
-  await nextTick()
-  sheet.value?.scrollIntoView({ block: 'start' })
+function jobText(stage) {
+  return jobLabels[stage] || jobLabels.unknown
+}
+
+function jobStep(stage) {
+  if (stage === 'done') return 3
+  if (stage === 'printing' || stage === 'stopped') return 2
+  if (stage === 'queued') return 1
+  return 0
+}
+
+function jobFill(stage) {
+  return ['25%', '50%', '75%', '100%'][jobStep(stage)]
+}
+
+function jobBad(stage) {
+  return stage === 'stopped' || stage === 'canceled' || stage === 'aborted' || stage === 'unknown'
+}
+
+function jobReached(index, stage) {
+  if (stage === 'canceled' || stage === 'aborted' || stage === 'unknown') return false
+  return index <= jobStep(stage)
+}
+
+function stopJobWatch() {
+  if (jobTimer) {
+    clearInterval(jobTimer)
+    jobTimer = 0
+  }
+}
+
+async function refreshJob() {
+  if (!job.value) return
+  try {
+    const data = await api.job(job.value.id)
+    job.value = data
+    if (data.stage === 'done' || data.stage === 'canceled' || data.stage === 'aborted' || data.stage === 'unknown') {
+      stopJobWatch()
+    }
+  } catch {
+    job.value = { id: job.value.id, stage: 'unknown' }
+    stopJobWatch()
+  }
+}
+
+function watchJob(id) {
+  stopJobWatch()
+  job.value = { id, stage: 'sent' }
+  // Стадия в CUPS меняется секундами, чаще опрашивать плату незачем.
+  jobTimer = setInterval(refreshJob, 2000)
+  refreshJob()
 }
 
 async function upload() {
@@ -62,7 +136,6 @@ async function upload() {
   }
   busy.value = true
   error.value = ''
-  ok.value = ''
   try {
     const data = await api.upload(chosen)
     input.value.value = ''
@@ -76,13 +149,19 @@ async function upload() {
   }
 }
 
+async function select(file) {
+  selected.value = file
+  error.value = ''
+  await nextTick()
+  sheet.value?.scrollIntoView({ block: 'start' })
+}
+
 async function doPrint() {
   if (!selected.value) return
   busy.value = true
   error.value = ''
-  ok.value = ''
   try {
-    await api.print({
+    const data = await api.print({
       file_id: selected.value.id,
       copies: copies.value,
       pages: pages.value,
@@ -90,7 +169,8 @@ async function doPrint() {
       media: media.value,
       fit: fit.value,
     })
-    ok.value = 'Отправлено на печать'
+    started.value = true
+    if (data && data.job_id) watchJob(data.job_id)
   } catch (err) {
     error.value = err.message
   } finally {
@@ -120,6 +200,8 @@ watch(() => route.query.file, async (id) => {
     error.value = err.message
   }
 })
+
+onBeforeUnmount(stopJobWatch)
 </script>
 
 <template>
@@ -133,7 +215,26 @@ watch(() => route.query.file, async (id) => {
   </form>
 
   <p v-if="error" class="msg error">{{ error }}</p>
-  <p v-if="ok" class="msg ok">{{ ok }}</p>
+
+  <section v-if="job" class="panel job">
+    <p class="job-title">{{ jobText(job.stage) }}</p>
+    <div
+      class="bar"
+      :class="{ bad: jobBad(job.stage) }"
+      role="progressbar"
+      :aria-valuetext="jobText(job.stage)"
+      aria-valuemin="1"
+      aria-valuemax="4"
+      :aria-valuenow="jobStep(job.stage) + 1"
+    >
+      <span :style="{ width: jobFill(job.stage) }"></span>
+    </div>
+    <ol class="stages">
+      <li v-for="(item, index) in jobStages" :key="item.id" :class="{ on: jobReached(index, job.stage) }">
+        {{ item.label }}
+      </li>
+    </ol>
+  </section>
 
   <section v-if="selected" ref="sheet" class="panel sheet">
     <h2>{{ selected.name }}</h2>
@@ -150,7 +251,9 @@ watch(() => route.query.file, async (id) => {
       <label>
         Бумага
         <select v-model="media">
-          <option v-for="size in (printer?.media || ['A4'])" :key="size" :value="size">{{ size }}</option>
+          <option v-for="size in (printer?.media || ['A4'])" :key="size" :value="size">
+            {{ printer?.media_labels?.[size] || size }}
+          </option>
         </select>
       </label>
       <label v-if="printer?.duplex">
@@ -177,4 +280,11 @@ watch(() => route.query.file, async (id) => {
     @deleted="onDeleted"
     @error="error = $event"
   />
+
+  <div v-if="started" class="modal-back" @click.self="started = false">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="print-started" @keydown.esc="started = false">
+      <h2 id="print-started">Печать запущена</h2>
+      <button type="button" class="primary" autofocus @click="started = false">Хорошо</button>
+    </div>
+  </div>
 </template>
