@@ -216,10 +216,12 @@ def scan(body: ScanIn, request: Request, response: Response, conn: Db) -> dict:
         raise HTTPException(400, "Некорректный формат")
     if body.geometry not in GEOMETRIES:
         raise HTTPException(400, "Некорректная область")
+    image_format, ext = spec
+    if request.app.state.scan_rotate and heavy_image_rotation(body.resolution, body.mode, ext):
+        raise HTTPException(400, HEAVY_ROTATE_DETAIL)
     user = ensure_user(conn, request, response)
     if db.count_files(conn, user["id"]) >= MAX_FILES_PER_USER:
         raise HTTPException(400, "Слишком много файлов. Удалите ненужные")
-    image_format, ext = spec
     relative = new_relative(ext)
     path = request.app.state.storage_dir / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -242,12 +244,8 @@ def scan(body: ScanIn, request: Request, response: Response, conn: Db) -> dict:
     if not path.is_file() or path.stat().st_size == 0:
         path.unlink(missing_ok=True)
         raise HTTPException(503, "Сканер не вернул изображение")
-    degrees = request.app.state.scan_rotate
-    if degrees and heavy_image_rotation(body.resolution, body.mode, ext):
-        path.unlink(missing_ok=True)
-        raise HTTPException(400, HEAVY_ROTATE_DETAIL)
     try:
-        rotate_scan(path, degrees)
+        rotate_scan(path, request.app.state.scan_rotate)
     except ScannerError as exc:
         path.unlink(missing_ok=True)
         raise HTTPException(503, str(exc)) from exc

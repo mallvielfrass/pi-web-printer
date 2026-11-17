@@ -122,24 +122,24 @@ def test_oversized_scan_is_deleted(app, client, monkeypatch):
 
 
 @pytest.mark.parametrize("fmt", ["png", "jpeg", "tiff"])
-def test_color_1200_image_is_not_rotated(tmp_path, monkeypatch, fmt):
+def test_color_1200_image_is_rejected_before_scan(tmp_path, fmt):
     app = create_app(tmp_path, scan_rotate=180)
+    called = False
 
     def fake(dest, **kwargs):
-        dest.write_bytes(b"scan")
-
-    def forbidden(path, degrees):
-        raise AssertionError("Pillow не должен открывать цветной кадр 1200 dpi")
+        nonlocal called
+        called = True
 
     app.state.scan_to_file = fake
-    monkeypatch.setattr(scanner, "_rotate_image", forbidden)
     with TestClient(app) as client:
         response = client.post(
             "/api/scan",
             json={"resolution": 1200, "mode": "color", "format": fmt},
         )
-    assert response.status_code == 400
-    assert response.json()["detail"] == scanner.HEAVY_ROTATE_DETAIL
+        assert response.status_code == 400
+        assert response.json()["detail"] == scanner.HEAVY_ROTATE_DETAIL
+        assert client.get("/api/auth/me").json()["user"] is None
+    assert called is False
     assert list(app.state.storage_dir.iterdir()) == []
 
 
