@@ -9,6 +9,7 @@ const selected = ref(null)
 const resolution = ref(300)
 const mode = ref('color')
 const format = ref('png')
+const geometry = ref('A4')
 const busy = ref(false)
 const error = ref('')
 
@@ -25,6 +26,7 @@ async function scan() {
       resolution: resolution.value,
       mode: mode.value,
       format: format.value,
+      geometry: geometry.value,
     })
     await reload()
     selected.value = data.file
@@ -60,6 +62,7 @@ onMounted(async () => {
           <option :value="150">150 dpi</option>
           <option :value="300">300 dpi</option>
           <option :value="600">600 dpi</option>
+          <option :value="1200">1200 dpi</option>
         </select>
       </label>
       <label>
@@ -68,6 +71,16 @@ onMounted(async () => {
           <option value="color">Цветной</option>
           <option value="gray">Оттенки серого</option>
           <option value="lineart">Чёрно-белый</option>
+        </select>
+      </label>
+      <label>
+        Область
+        <select v-model="geometry">
+          <option value="A4">A4</option>
+          <option value="A5">A5</option>
+          <option value="B5">B5</option>
+          <option value="Letter">Letter</option>
+          <option value="Full size">Всё стекло</option>
         </select>
       </label>
       <label>
@@ -84,7 +97,7 @@ onMounted(async () => {
       {{ busy ? 'Сканирование…' : 'Сканировать' }}
     </button>
   </form>
-  <p class="muted hint">На Pi с 1 ГБ для текста лучше 150–300 dpi и оттенки серого.</p>
+  <p class="muted hint">На Pi с 1 ГБ для текста лучше 150–300 dpi и оттенки серого. Цвет 1200 dpi для поворота сохраняйте как PDF.</p>
   <p v-if="error" class="msg error">{{ error }}</p>
 
   <section v-if="selected" class="panel">
