@@ -7,7 +7,7 @@ import FilePreview from '../components/FilePreview.vue'
 const files = ref([])
 const selected = ref(null)
 const resolution = ref(300)
-const mode = ref('gray')
+const mode = ref('color')
 const format = ref('png')
 const busy = ref(false)
 const error = ref('')
