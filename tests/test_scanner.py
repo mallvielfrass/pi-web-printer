@@ -14,6 +14,7 @@ def test_scan_saves_user_file(app, client):
         assert kwargs["resolution"] == 150
         assert kwargs["mode"] == "Gray"
         assert kwargs["image_format"] == "png"
+        assert kwargs["geometry"] == "A4"
         dest.write_bytes(b"\x89PNG\r\n\x1a\n")
 
     app.state.scan_to_file = fake
@@ -25,6 +26,69 @@ def test_scan_saves_user_file(app, client):
     listed = client.get("/api/files", params={"kind": "scan"}).json()["files"]
     assert [item["id"] for item in listed] == [saved["id"]]
     assert client.get("/api/auth/me").json()["user"]["temporary"] is True
+
+
+def test_resolution_1200_is_allowed(app, client):
+    def fake(dest, **kwargs):
+        assert kwargs["resolution"] == 1200
+        dest.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    app.state.scan_to_file = fake
+    response = client.post("/api/scan", json={"resolution": 1200, "mode": "color", "format": "png"})
+    assert response.status_code == 200
+    assert response.json()["file"]["name"].endswith(".png")
+
+
+def test_geometry_full_size_is_passed(app, client):
+    def fake(dest, **kwargs):
+        assert kwargs["geometry"] == "Full size"
+        dest.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    app.state.scan_to_file = fake
+    response = client.post("/api/scan", json={"geometry": "Full size"})
+    assert response.status_code == 200
+
+
+def test_bad_geometry_does_not_create_guest(client):
+    response = client.post("/api/scan", json={"geometry": "稿台"})
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Некорректная область"
+    assert client.get("/api/auth/me").json()["user"] is None
+
+
+def test_scan_command_passes_geometry_as_argument(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        assert "shell" not in kwargs
+        seen["command"] = list(command)
+
+        class Proc:
+            returncode = 0
+            stderr = b""
+
+        return Proc()
+
+    monkeypatch.setattr(scanner.subprocess, "run", fake_run)
+    dest = tmp_path / "out.png"
+    scanner.scan_to_file(
+        dest,
+        resolution=300,
+        mode="Gray",
+        image_format="png",
+        device="escl:http://127.0.0.1:60000",
+        geometry="Full size",
+    )
+    assert seen["command"] == [
+        "scanimage",
+        "--resolution=300",
+        "--mode=Gray",
+        "--format=png",
+        "--geometry",
+        "Full size",
+        f"--output-file={dest}",
+        "--device-name=escl:http://127.0.0.1:60000",
+    ]
 
 
 def test_bad_resolution_does_not_create_guest(client):
@@ -51,9 +115,73 @@ def test_oversized_scan_is_deleted(app, client, monkeypatch):
         dest.write_bytes(b"12345")
 
     app.state.scan_to_file = fake
-    response = client.post("/api/scan", json={})
+    response = client.post("/api/scan", json={"resolution": 1200, "mode": "color", "format": "png"})
     assert response.status_code == 400
+    assert response.json()["detail"] == "Слишком большое изображение, уменьшите разрешение"
     assert list(app.state.storage_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("fmt", ["png", "jpeg", "tiff"])
+def test_color_1200_image_is_rejected_before_scan(tmp_path, fmt):
+    app = create_app(tmp_path, scan_rotate=180)
+    called = False
+
+    def fake(dest, **kwargs):
+        nonlocal called
+        called = True
+
+    app.state.scan_to_file = fake
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/scan",
+            json={"resolution": 1200, "mode": "color", "format": fmt},
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == scanner.HEAVY_ROTATE_DETAIL
+        assert client.get("/api/auth/me").json()["user"] is None
+    assert called is False
+    assert list(app.state.storage_dir.iterdir()) == []
+
+
+def test_color_1200_pdf_still_rotates(tmp_path):
+    from pypdf import PdfReader, PdfWriter
+
+    app = create_app(tmp_path, scan_rotate=180)
+
+    def fake(dest, **kwargs):
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=100)
+        with dest.open("wb") as handle:
+            writer.write(handle)
+
+    app.state.scan_to_file = fake
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/scan",
+            json={"resolution": 1200, "mode": "color", "format": "pdf"},
+        )
+        assert response.status_code == 200, response.text
+        data = client.get(f"/api/files/{response.json()['file']['id']}/download").content
+    reader = PdfReader(BytesIO(data))
+    assert [page.rotation for page in reader.pages] == [180]
+
+
+def test_gray_1200_png_still_rotates(tmp_path):
+    app = create_app(tmp_path, scan_rotate=90)
+
+    def fake(dest, **kwargs):
+        _marked_image(dest, "PNG")
+
+    app.state.scan_to_file = fake
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/scan",
+            json={"resolution": 1200, "mode": "gray", "format": "png"},
+        )
+        assert response.status_code == 200, response.text
+        data = client.get(f"/api/files/{response.json()['file']['id']}/download").content
+    with Image.open(BytesIO(data)) as image:
+        assert image.size == (2, 3)
 
 
 def _marked_image(path, kind):

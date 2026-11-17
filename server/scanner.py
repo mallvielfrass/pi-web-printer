@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
-RESOLUTIONS = {75, 150, 300, 600}
+RESOLUTIONS = {75, 150, 300, 600, 1200}
 MODES = {
     "color": "Color",
     "gray": "Gray",
@@ -33,9 +33,15 @@ FORMATS = {
     "tiff": ("tiff", ".tiff"),
     "pdf": ("pdf", ".pdf"),
 }
+# У pantum6500 есть ещё «稿台» (стекло). В форму его не кладём.
+GEOMETRIES = {"A4", "A5", "B5", "Letter", "Full size"}
 
-# Цветной скан 600 dpi легко занимает десятки мегабайт и память платы.
-MAX_SCAN_BYTES = 80 * 1024 * 1024
+# Цветной A4 на 1200 dpi в PNG часто больше 80 МБ, поэтому предел 128 МБ.
+# Несжатый цветной кадр — около 400 МБ. Pillow при повороте держит его целиком,
+# на плате с 1 ГБ это обрыв. Такой PNG, JPEG и TIFF не поворачиваем.
+# PDF поворачивает pypdf без распаковки картинки.
+MAX_SCAN_BYTES = 128 * 1024 * 1024
+HEAVY_ROTATE_DETAIL = "Цветной скан 1200 dpi не поворачивается: не хватит памяти. Выберите PDF"
 
 # По часовой стрелке. 180 — обычный случай этого МФУ: лист выходит вверх ногами.
 SCAN_ROTATIONS = {0, 90, 180, 270}
@@ -58,6 +64,11 @@ def parse_scan_rotate(raw: str | None) -> int:
     if text not in {"0", "90", "180", "270"}:
         raise ValueError("SCAN_ROTATE должен быть 0, 90, 180 или 270")
     return int(text)
+
+
+def heavy_image_rotation(resolution: int, mode: str, ext: str) -> bool:
+    """Цвет 1200 dpi — примерно 400 МБ на A4, это выше 250 МБ для Pillow."""
+    return resolution >= 1200 and mode == "color" and ext in _IMAGE_EXT
 
 
 def rotate_scan(path: Path, degrees: int) -> None:
@@ -156,6 +167,7 @@ class ScanIn(BaseModel):
     resolution: int = 300
     mode: str = "color"
     format: str = "png"
+    geometry: str = "A4"
 
 
 def scan_to_file(
@@ -165,12 +177,16 @@ def scan_to_file(
     mode: str,
     image_format: str,
     device: str | None,
+    geometry: str,
 ) -> None:
+    # «Full size» содержит пробел, поэтому значение — отдельный аргумент, не склейка.
     command = [
         "scanimage",
         f"--resolution={resolution}",
         f"--mode={mode}",
         f"--format={image_format}",
+        "--geometry",
+        geometry,
         f"--output-file={dest}",
     ]
     if device:
@@ -198,10 +214,14 @@ def scan(body: ScanIn, request: Request, response: Response, conn: Db) -> dict:
     spec = FORMATS.get(body.format)
     if spec is None:
         raise HTTPException(400, "Некорректный формат")
+    if body.geometry not in GEOMETRIES:
+        raise HTTPException(400, "Некорректная область")
+    image_format, ext = spec
+    if request.app.state.scan_rotate and heavy_image_rotation(body.resolution, body.mode, ext):
+        raise HTTPException(400, HEAVY_ROTATE_DETAIL)
     user = ensure_user(conn, request, response)
     if db.count_files(conn, user["id"]) >= MAX_FILES_PER_USER:
         raise HTTPException(400, "Слишком много файлов. Удалите ненужные")
-    image_format, ext = spec
     relative = new_relative(ext)
     path = request.app.state.storage_dir / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -212,6 +232,7 @@ def scan(body: ScanIn, request: Request, response: Response, conn: Db) -> dict:
             mode=MODES[body.mode],
             image_format=image_format,
             device=request.app.state.scanner_device,
+            geometry=body.geometry,
         )
     except ScannerError as exc:
         path.unlink(missing_ok=True)
