@@ -44,7 +44,7 @@ class ScannerError(Exception):
 class ScanIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     resolution: int = 300
-    mode: str = "gray"
+    mode: str = "color"
     format: str = "png"
 
 
