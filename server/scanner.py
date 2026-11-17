@@ -2,6 +2,7 @@
 
 Аргументы передаются списком, оболочка не используется.
 app.state.scan_to_file можно подменить в тестах.
+После успешного скана файл поворачивается, если задан SCAN_ROTATE.
 """
 
 import logging
@@ -36,9 +37,118 @@ FORMATS = {
 # Цветной скан 600 dpi легко занимает десятки мегабайт и память платы.
 MAX_SCAN_BYTES = 80 * 1024 * 1024
 
+# По часовой стрелке. 180 — обычный случай этого МФУ: лист выходит вверх ногами.
+SCAN_ROTATIONS = {0, 90, 180, 270}
+_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+_FORMAT_BY_EXT = {
+    ".png": "PNG",
+    ".jpg": "JPEG",
+    ".jpeg": "JPEG",
+    ".tif": "TIFF",
+    ".tiff": "TIFF",
+}
+
 
 class ScannerError(Exception):
     pass
+
+
+def parse_scan_rotate(raw: str | None) -> int:
+    text = "0" if raw is None or not raw.strip() else raw.strip()
+    if text not in {"0", "90", "180", "270"}:
+        raise ValueError("SCAN_ROTATE должен быть 0, 90, 180 или 270")
+    return int(text)
+
+
+def rotate_scan(path: Path, degrees: int) -> None:
+    """Поворот уже записанного скана. 0 ничего не делает и файл не открывает."""
+    if degrees == 0:
+        return
+    if degrees not in SCAN_ROTATIONS:
+        raise ScannerError("Некорректный угол поворота")
+    ext = path.suffix.lower()
+    try:
+        if ext == ".pdf":
+            _rotate_pdf(path, degrees)
+        elif ext in _IMAGE_EXT:
+            _rotate_image(path, degrees)
+        else:
+            raise ScannerError("Этот формат скана нельзя повернуть")
+    except ScannerError:
+        raise
+    except Exception as exc:
+        log.exception("поворот скана")
+        raise ScannerError("Не удалось повернуть скан") from exc
+
+
+def _rotate_image(path: Path, degrees: int) -> None:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ScannerError("Не установлен Pillow") from exc
+    # Pillow крутит против часовой. 90° по часовой — это ROTATE_270.
+    clockwise = {
+        90: Image.Transpose.ROTATE_270,
+        180: Image.Transpose.ROTATE_180,
+        270: Image.Transpose.ROTATE_90,
+    }
+    image = Image.open(path)
+    rotated = None
+    try:
+        fmt = image.format or _FORMAT_BY_EXT[path.suffix.lower()]
+        rotated = image.transpose(clockwise[degrees])
+    finally:
+        image.close()
+    tmp = path.with_name(path.name + ".rot")
+    try:
+        kwargs: dict = {}
+        if fmt == "JPEG":
+            kwargs["quality"] = 90
+            if rotated.mode not in ("L", "RGB"):
+                converted = rotated.convert("RGB")
+                rotated.close()
+                rotated = converted
+        elif fmt == "TIFF":
+            kwargs["compression"] = "tiff_lzw"
+        rotated.save(tmp, format=fmt, **kwargs)
+        tmp.chmod(0o600)
+        tmp.replace(path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    finally:
+        if rotated is not None:
+            rotated.close()
+
+
+def _rotate_pdf(path: Path, degrees: int) -> None:
+    # pypdf меняет поле /Rotate. Картинка страницы не распаковывается —
+    # на 1 ГБ это легче, чем перерисовать PDF.
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError as exc:
+        raise ScannerError("Не установлен pypdf") from exc
+    reader = PdfReader(str(path))
+    writer = None
+    tmp = path.with_name(path.name + ".rot")
+    try:
+        if len(reader.pages) == 0:
+            raise ScannerError("В PDF нет страниц")
+        writer = PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
+            writer.pages[-1].rotate(degrees)
+        with tmp.open("wb") as handle:
+            writer.write(handle)
+        tmp.chmod(0o600)
+        tmp.replace(path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    finally:
+        if writer is not None:
+            writer.close()
+        reader.close()
 
 
 class ScanIn(BaseModel):
@@ -110,6 +220,14 @@ def scan(body: ScanIn, request: Request, response: Response, conn: Db) -> dict:
         path.unlink(missing_ok=True)
         log.exception("скан не выполнен")
         raise HTTPException(503, "Не удалось отсканировать") from None
+    if not path.is_file() or path.stat().st_size == 0:
+        path.unlink(missing_ok=True)
+        raise HTTPException(503, "Сканер не вернул изображение")
+    try:
+        rotate_scan(path, request.app.state.scan_rotate)
+    except ScannerError as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(503, str(exc)) from exc
     size = path.stat().st_size if path.is_file() else 0
     if size == 0:
         path.unlink(missing_ok=True)

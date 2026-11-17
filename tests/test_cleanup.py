@@ -41,6 +41,10 @@ def test_cleanup_removes_expired_guest_only(app):
             conn.close()
 
         disk = app.state.storage_dir / owner["path"]
+        preview_pdf = app.state.preview_dir / f"{guest_file['id']}.pdf"
+        preview_jpg = app.state.preview_dir / f"{guest_file['id']}.jpg"
+        preview_pdf.write_bytes(b"pdf")
+        preview_jpg.write_bytes(b"jpg")
         assert disk.is_file()
         conn = db.connect(app.state.db_path)
         try:
@@ -59,6 +63,8 @@ def test_cleanup_removes_expired_guest_only(app):
 
         assert removed == 1
         assert not disk.exists()
+        assert not preview_pdf.exists()
+        assert not preview_jpg.exists()
         assert gone_user is None
         assert gone_file is None
         assert gone_session is None

@@ -11,7 +11,7 @@ import logging
 from fastapi import FastAPI
 
 from server import db
-from server.files import absolute_path
+from server.files import absolute_path, remove_previews
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ def delete_expired(conn, storage, preview_dir) -> int:
             path = absolute_path(storage, row["path"])
             if path is not None:
                 path.unlink(missing_ok=True)
-            (preview_dir / f"{row['id']}.pdf").unlink(missing_ok=True)
+            remove_previews(preview_dir, row["id"])
         db.delete_user(conn, user["id"])
     db.delete_expired_sessions(conn, now)
     return len(users)

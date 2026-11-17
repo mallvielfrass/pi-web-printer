@@ -5,16 +5,18 @@ Wants=network-online.target cups.service ipp-usb.service
 
 [Service]
 Type=simple
-User=pi
-Group=pi
+User=flutter
+Group=flutter
 SupplementaryGroups=lp scanner
 UMask=0077
 WorkingDirectory=/opt/pi-web-printer
 Environment=DATA_DIR=/var/lib/pi-web-printer
 # Имя очереди из `lpstat -p`. Без этой строки берётся первый принтер.
-# Environment=PRINTER_NAME=Pantum-M6507
-# Строка из `scanimage -L`, в кавычках. Без неё scanimage сам выбирает устройство.
-# Environment=SCANNER_DEVICE=escl:http://127.0.0.1:60000
+# Environment=PRINTER_NAME=M6507
+# Адрес pantum6500:libusb:001:NNN меняется при переподключении USB. Лучше не задавать.
+# Environment=SCANNER_DEVICE=
+# Поворот скана по часовой стрелке: 0, 90, 180 или 270. Для этого МФУ — 180.
+# Environment=SCAN_ROTATE=180
 ExecStart=/opt/pi-web-printer/.venv/bin/uvicorn server.main:app --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=3

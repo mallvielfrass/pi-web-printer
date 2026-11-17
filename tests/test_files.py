@@ -118,23 +118,98 @@ def test_delete_removes_disk_file(app, client):
     finally:
         conn.close()
     disk = app.state.storage_dir / relative
+    preview_pdf = app.state.preview_dir / f"{file_id}.pdf"
+    preview_jpg = app.state.preview_dir / f"{file_id}.jpg"
+    preview_pdf.write_bytes(b"%PDF")
+    preview_jpg.write_bytes(b"jpeg")
     assert disk.is_file()
     assert client.delete(f"/api/files/{file_id}").status_code == 200
     assert not disk.exists()
+    assert not preview_pdf.exists()
+    assert not preview_jpg.exists()
     assert client.get(f"/api/files/{file_id}").status_code == 404
 
 
-def test_preview_png_and_text(client):
-    png = b"\x89PNG\r\n\x1a\nfake"
-    image_id = upload(client, "pic.png", png).json()["file"]["id"]
-    image = client.get(f"/api/files/{image_id}/preview")
-    assert image.status_code == 200
-    assert image.content == png
-    assert image.headers["content-type"].startswith("image/png")
+def _picture(width, height, kind):
+    from io import BytesIO
 
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", (width, height), (10, 20, 30)).save(buf, kind)
+    return buf.getvalue()
+
+
+def test_image_preview_is_small_jpeg(app, client):
+    png = _picture(2400, 1800, "PNG")
+    file_id = upload(client, "pic.png", png).json()["file"]["id"]
+    first = client.get(f"/api/files/{file_id}/preview")
+    assert first.status_code == 200
+    assert first.headers["content-type"].startswith("image/jpeg")
+    assert first.content != png
+    cached = app.state.preview_dir / f"{file_id}.jpg"
+    assert cached.is_file()
+    stamp = cached.stat().st_mtime_ns
+    second = client.get(f"/api/files/{file_id}/preview")
+    assert second.content == first.content
+    assert cached.stat().st_mtime_ns == stamp
+    downloaded = client.get(f"/api/files/{file_id}/download")
+    assert downloaded.content == png
+    assert downloaded.headers["content-type"].startswith("image/png")
+    from io import BytesIO
+
+    from PIL import Image
+
+    with Image.open(BytesIO(first.content)) as preview:
+        assert preview.size == (1600, 1200)
+
+
+def test_jpeg_preview_shrinks_long_side(client):
+    from io import BytesIO
+
+    from PIL import Image
+    from PIL.ExifTags import Base
+
+    jpeg = _picture(3000, 1000, "JPEG")
+    file_id = upload(client, "wide.jpg", jpeg).json()["file"]["id"]
+    preview = client.get(f"/api/files/{file_id}/preview")
+    assert preview.status_code == 200
+    with Image.open(BytesIO(preview.content)) as image:
+        assert max(image.size) == 1600
+        assert image.size[0] > image.size[1]
+
+    turned = Image.new("L", (40, 10), 80)
+    exif = turned.getexif()
+    exif[Base.Orientation] = 6
+    buf = BytesIO()
+    turned.save(buf, "JPEG", exif=exif)
+    oriented_id = upload(client, "phone.jpg", buf.getvalue()).json()["file"]["id"]
+    oriented = client.get(f"/api/files/{oriented_id}/preview")
+    assert oriented.status_code == 200
+    with Image.open(BytesIO(oriented.content)) as image:
+        # Тег 6 — 90° по часовой: 40×10 становится 10×40.
+        assert image.size == (10, 40)
+    assert client.get(f"/api/files/{oriented_id}/download").content == buf.getvalue()
+
+
+def test_tiff_preview_is_jpeg_not_pdf(client):
+    tiff = _picture(32, 16, "TIFF")
+    file_id = upload(client, "scan.tiff", tiff).json()["file"]["id"]
+    preview = client.get(f"/api/files/{file_id}/preview")
+    assert preview.status_code == 200
+    assert preview.headers["content-type"].startswith("image/jpeg")
+    assert preview.content.startswith(b"\xff\xd8\xff")
+    assert client.get(f"/api/files/{file_id}/download").content == tiff
+
+
+def test_preview_text_and_broken_image(client):
     text_id = upload(client, "a.txt", "Привет".encode()).json()["file"]["id"]
     preview = client.get(f"/api/files/{text_id}/preview")
     assert "Привет" in preview.text
+
+    broken = upload(client, "pic.png", b"\x89PNG\r\n\x1a\nfake").json()["file"]["id"]
+    assert client.get(f"/api/files/{broken}/preview").status_code == 503
+    assert client.get(f"/api/files/{broken}/download").content.startswith(b"\x89PNG")
 
 
 def test_office_preview_uses_converter(client, monkeypatch):

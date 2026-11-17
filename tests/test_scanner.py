@@ -1,4 +1,11 @@
+from io import BytesIO
+
+import pytest
+from fastapi.testclient import TestClient
+from PIL import Image
+
 from server import scanner
+from server.main import app_from_env, create_app
 from tests.helpers import upload
 
 
@@ -47,6 +54,116 @@ def test_oversized_scan_is_deleted(app, client, monkeypatch):
     response = client.post("/api/scan", json={})
     assert response.status_code == 400
     assert list(app.state.storage_dir.iterdir()) == []
+
+
+def _marked_image(path, kind):
+    image = Image.new("RGB", (3, 2), (0, 0, 0))
+    image.putpixel((0, 0), (255, 0, 0))
+    image.save(path, kind)
+
+
+@pytest.mark.parametrize(
+    ("degrees", "size", "pixel"),
+    [
+        (90, (2, 3), (1, 0)),
+        (180, (3, 2), (2, 1)),
+        (270, (2, 3), (0, 2)),
+    ],
+)
+def test_scan_rotate_png(tmp_path, degrees, size, pixel):
+    app = create_app(tmp_path, scan_rotate=degrees)
+
+    def fake(dest, **kwargs):
+        _marked_image(dest, "PNG")
+
+    app.state.scan_to_file = fake
+    with TestClient(app) as client:
+        response = client.post("/api/scan", json={"format": "png", "resolution": 150})
+        assert response.status_code == 200, response.text
+        data = client.get(f"/api/files/{response.json()['file']['id']}/download").content
+    with Image.open(BytesIO(data)) as image:
+        assert image.size == size
+        assert image.getpixel(pixel) == (255, 0, 0)
+        assert image.getpixel((0, 0)) != (255, 0, 0)
+
+
+def test_scan_rotate_jpeg_keeps_format(tmp_path):
+    app = create_app(tmp_path, scan_rotate=90)
+
+    def fake(dest, **kwargs):
+        _marked_image(dest, "JPEG")
+
+    app.state.scan_to_file = fake
+    with TestClient(app) as client:
+        response = client.post("/api/scan", json={"format": "jpeg"})
+        assert response.status_code == 200, response.text
+        data = client.get(f"/api/files/{response.json()['file']['id']}/download").content
+    with Image.open(BytesIO(data)) as image:
+        assert image.format == "JPEG"
+        assert image.size == (2, 3)
+
+
+def test_scan_rotate_pdf_pages(tmp_path):
+    from pypdf import PdfReader, PdfWriter
+
+    app = create_app(tmp_path, scan_rotate=180)
+
+    def fake(dest, **kwargs):
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=100)
+        writer.add_blank_page(width=150, height=80)
+        with dest.open("wb") as handle:
+            writer.write(handle)
+
+    app.state.scan_to_file = fake
+    with TestClient(app) as client:
+        response = client.post("/api/scan", json={"format": "pdf"})
+        assert response.status_code == 200, response.text
+        data = client.get(f"/api/files/{response.json()['file']['id']}/download").content
+    reader = PdfReader(BytesIO(data))
+    assert [page.rotation for page in reader.pages] == [180, 180]
+
+
+def test_scan_without_rotation_keeps_scanner_bytes(app, client):
+    payload = b"\x89PNG\r\n\x1a\nunchanged"
+
+    def fake(dest, **kwargs):
+        dest.write_bytes(payload)
+
+    app.state.scan_to_file = fake
+    response = client.post("/api/scan", json={"format": "png"})
+    assert response.status_code == 200
+    file_id = response.json()["file"]["id"]
+    assert client.get(f"/api/files/{file_id}/download").content == payload
+
+
+def test_rotate_error_deletes_scan(app, client, monkeypatch):
+    app.state.scan_rotate = 180
+
+    def fake(dest, **kwargs):
+        dest.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def boom(path, degrees):
+        raise scanner.ScannerError("не повернули")
+
+    app.state.scan_to_file = fake
+    monkeypatch.setattr(scanner, "rotate_scan", boom)
+    response = client.post("/api/scan", json={"format": "png"})
+    assert response.status_code == 503
+    assert "не повернули" in response.json()["detail"]
+    assert list(app.state.storage_dir.iterdir()) == []
+
+
+def test_bad_scan_rotate_rejected(tmp_path, monkeypatch):
+    with pytest.raises(ValueError):
+        create_app(tmp_path / "bad", scan_rotate=45)
+    assert scanner.parse_scan_rotate(None) == 0
+    assert scanner.parse_scan_rotate("  ") == 0
+    assert scanner.parse_scan_rotate("180") == 180
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "env"))
+    monkeypatch.setenv("SCAN_ROTATE", "15")
+    with pytest.raises(SystemExit):
+        app_from_env()
 
 
 def test_scan_does_not_replace_an_uploaded_file(app, client):

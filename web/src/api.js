@@ -80,6 +80,9 @@ export const api = {
   print(body) {
     return request('/api/print', jsonOptions('POST', body))
   },
+  job(id) {
+    return request(`/api/jobs/${id}`)
+  },
   scan(body) {
     return request('/api/scan', jsonOptions('POST', body))
   },
